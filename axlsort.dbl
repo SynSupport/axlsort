@@ -1,0 +1,959 @@
+;-------------------------------------------------------------------------------
+;
+; axlsort.dbl           ActiveX list sorting functions
+;
+; Chip Camden           January 31, 2006
+;
+;-------------------------------------------------------------------------------
+;
+.include "DBLDIR:windows.def"
+.include "DBLDIR:activex.def"
+.include "DBLDIR:rcbapi.def"
+.include "WND:system.def"
+
+;-------------------------------------------------------------------------------
+;
+; Published functions:
+;
+;-------------------------------------------------------------------------------
+
+.function axl_sortable  ,^val, reentrant
+;
+; Description:  Specify column sort criteria for a list
+;
+; Arguments:
+;
+    a_listid    ,n  ;ID of the list
+
+    a_setname   ,a  ;(Optional) input set name
+
+    a_methodset ,n  ;(Optional) UWNDEVENTS_METHOD set
+
+    a_asc       ,a  ;(Optional) ascending sort indicator
+
+    a_desc      ,a  ;(Optional) descending sort indicator
+
+    a_front     ,n  ;(Optional) place indicators at front?
+;
+; Return value:  TRUE if successful, FALSE if not (error already emitted)
+;
+.include "WND:tools.def"
+.include "WND:setinf.def"
+;NOTE:  the following must immediately follow the include of setinf.def
+    record ,x           ;Overlay to avoid problems with -qcheck
+    ,a ^size(gs_sethdr)
+    flds		,a DS_MAXFLDS
+
+.include "WND:fldinf.def"
+.include "INC:axlsort.def"
+;
+
+.align
+    stack record
+        hndl        ,D_ADDR     ;Handle to controls
+        axctl       ,D_ADDR     ;ActiveX control ID
+        wndid       ,D_NATINT   ;Window ID of the container
+        hdrstatic   ,D_NATINT   ;Is header static?
+        dlen        ,D_NATINT   ;Data length
+        inpid       ,D_NATINT   ;ID of the input window
+        setid       ,D_NATINT   ;Input set number
+        colnum      ,D_NATINT   ;Column number in the list
+        fld         ,D_NATINT   ;Input field index
+        setname     ,a30        ;Name of the input set
+
+.align
+    static record
+        s_methodset ,D_ADDR     ;Default method set
+
+.proc
+.ifdef D_GUI
+    xcall l_status(a_listid,
+&       D_LCTRID, wndid,     ;Get container window
+&       D_LAXCTRL, axctl,    ;Get ActiveX control ID
+&       D_LHDRSTATIC, hdrstatic, ;Get header static flag
+&       D_LDATALEN, dlen,    ;Get length of data argument
+&       D_LINPID, inpid)     ;Get input window ID
+    if (!axctl)         ;Not an ActiveX list?
+        freturn %axlu_errorout("Id %d is not the Id of an ActiveX list", a_listid)
+    if (hdrstatic)          ;Headers cannot be static
+        freturn %axlu_errorout("Headers on list %d are static", a_listid)
+    if (!dlen)
+        freturn %axlu_errorout("List %d has no data to sort by", a_listid)
+
+    ;Process set name
+    if (^passed(a_setname) && a_setname) then   ;Name passed?
+        xcall i_setinf(inpid, setname = a_setname, setid = 0,, gs_fldset) ;Validate
+    else
+        xcall i_setinf(inpid, setname = "", setid = 1,, gs_fldset)    ;Use default set
+
+    ;Create the user data set for the controls
+    xcall w_flds(wndid, WF_USER, D_UDS_CTLS, 1, ^size(st_sortctls))
+    hndl = %w_info(WIF_USRMEM, wndid, D_UDS_CTLS)
+    clear ^i(^m(hndl))      ;Initialize to all zeroes
+
+    ;Save off the sort-order indicators
+    M_SORTCTL(hndl, sc_front) = (^passed(a_front) && a_front)
+    if (^passed(a_asc) && a_asc)
+    begin
+        M_SORTCTL(hndl, sc_asc) = a_asc
+        if (M_SORTCTL(hndl, sc_front)) then
+            M_GETMIN(M_SORTCTL(hndl, sc_asclen), ^size(a_asc), ^size(sc_asclen))
+        else
+            M_GETMIN(M_SORTCTL(hndl, sc_asclen), %trim(a_asc), ^size(sc_asclen))
+    end
+    if (^passed(a_desc) && a_desc)
+    begin
+        M_SORTCTL(hndl, sc_desc) = a_desc
+        if (M_SORTCTL(hndl, sc_front)) then
+            M_GETMIN(M_SORTCTL(hndl, sc_desclen), ^size(a_desc), ^size(sc_desclen))
+        else
+            M_GETMIN(M_SORTCTL(hndl, sc_desclen), %trim(a_desc), ^size(sc_desclen))
+    end
+
+    M_SORTCTL(hndl, sc_setname) = setname       ;Save off the set name
+    M_SORTCTL(hndl, sc_len) = dlen          ;Save off data length
+    M_SORTCTL(hndl, sc_flags) = D_FLAG_RELOAD   ;Load data on next sort
+    clear M_SORTCTL(hndl, sc_lmethod)       ;Clear load method for now
+
+    clear colnum
+    for fld from 1 thru %i_info(inpid, D_NMFLDS)    ;For each input field
+    begin
+        xcall i_fldinf(inpid,, fld,, gs_inpfld) ;Get field information
+        if (gs_promptfld)
+            incr colnum               ;Prompts get a column
+        incr colnum                 ;So do all fields
+        if (%instr(1,flds(1:gs_setcnt), %char(fld)))        ;Field in set?
+        begin
+            M_SORTFLD(hndl, colnum, sc_datapos) = gs_pos        ;Data position
+            M_SORTFLD(hndl, colnum, sc_datalen) = gs_siz        ;Length
+            M_SORTFLD(hndl, colnum, sc_type) = gs_typ       ;Data type
+            if (gs_selid && gs_estep)               ;Enumerated selections?
+            begin
+                M_SORTFLD(hndl, colnum, sc_selwnd) = gs_selid   ;Selection wnd id
+                M_SORTFLD(hndl, colnum, sc_ebase) = gs_ebase    ;Enumerated base
+                M_SORTFLD(hndl, colnum, sc_estep) = gs_estep    ;Enumerated step
+            end
+        end
+    end
+    M_SORTCTL(hndl, sc_numcols) = colnum                ;Save number of columns
+
+    ;Establish the UWNDEVENTS_METHOD set
+    if (^passed(a_methodset) && a_methodset) then
+        xcall l_method(a_listid, D_LWNDEVENT, a_methodset)
+    else
+    begin
+        if (!s_methodset)
+            s_methodset = %u_wndevents(D_CREATE,,
+&               D_EVENT_LEFT_CLICK, "axle_left_click")
+        xcall l_method(a_listid, D_LWNDEVENT, s_methodset)
+    end
+
+    freturn TRUE        ;Success!
+.else
+    freturn FALSE       ;Non-Windows
+.endc
+.end
+
+.ifdef DBLv9
+.function axl_sort  ,^val, reentrant, varargs
+.else
+.function axl_sort  ,^val, reentrant
+.endc
+;
+; Description: Sort an ActiveX list
+;
+; Arguments:
+;
+    a_listid    ,n      ;ID of the list
+
+;   (optional method data arguments)
+;
+; Return value: TRUE if successful, FALSE if not
+;
+.include "INC:axlsort.def"
+
+;We need to use a global here, because there is no other way to pass
+; data to a QSORT callback function.  It would be nice if QSORT supported
+; optional method data arguments (even just one).
+;
+; With apologies and oblations to the programming gods.  When OO becomes
+; published, we could use a singleton class here instead.
+
+    global data section axl_sortctl, init
+        record
+            g_hndl      ,D_ADDR     ;Handle to controls
+    endglobal
+
+.align
+    stack record
+        cbid        ,D_ADDR     ;Call block ID
+        ary         ,D_HANDLE   ;Handle to a memory array
+        axctl       ,D_ADDR     ;ActiveX control ID
+        findlen     ,D_NATINT   ;Find string length
+        findcase    ,D_NATINT   ;Find case
+        findcurr    ,D_NATINT   ;Test current item?
+        finddir     ,D_NATINT   ;Find direction
+        findpos     ,D_NATINT   ;Find position
+        findsource  ,D_NATINT   ;Display or data
+        findtype    ,D_NATINT   ;Type of comparison
+        findwrap    ,D_NATINT   ;Wrap-around?
+        null        ,D_NATINT   ;Null list?
+        inpid       ,D_NATINT   ;Input window ID
+        wndid       ,D_NATINT   ;List window ID
+        len         ,D_NATINT   ;Length
+        alloc       ,D_NATINT   ;Number of records allocated in memory array
+        ndx         ,D_NATINT   ;An index
+        offset      ,D_NATINT   ;Offset to beginning of record
+        req         ,D_NATINT   ;Request code for load method
+        findstr     ,a D_LMAXFIND   ;Find string
+        refind      ,a D_LMAXFIND   ;Data for previously selected item
+        data        ,a D_LL_MAXDATA ;Data for an item
+
+    structure st_data
+        a           ,a1
+
+.proc
+.ifdef D_GUI
+    if (!(g_hndl = %axlu_getctls(a_listid)))    ;Get controls handle
+        freturn FALSE
+    xcall l_status(a_listid, D_LFINDLEN, findlen, D_LFINDSTR, findstr,
+&       D_LFINDCASE, findcase, D_LFINDCURR, findcurr,
+&       D_LFINDDIR, finddir, D_LFINDPOS, findpos,
+&       D_LFINDSOURCE, findsource, D_LFINDTYPE, findtype,
+&       D_LINPID, inpid, D_LLASTITM, alloc,
+&       D_LCTRID, wndid, D_LAXCTRL, axctl)
+    if (alloc < 1)
+        alloc = 1         ;To avoid mem_proc errors
+
+    xcall w_proc(WP_HOURGLASS_ON)
+    cbid = %rcb_create(%numargs, DRCB_REPLICATE)
+    xcall rcb_setfnc(cbid, "l_data")
+    xcall rcb_insarg(cbid, 2, req)
+    xcall rcb_insarg(cbid, 3, inpid)
+    xcall rcb_insarg(cbid, 4, data)
+    xcall rcb_insarg(cbid, 5)
+    xcall rcb_insarg(cbid, 6, null)
+    req = D_LCURRENT
+    xcall rcb_call(cbid)        ;Call L_DATA to get current item
+    refind = data           ;Save off the current item's data
+
+    ;Get the data array
+    len = M_SORTCTL(g_hndl, sc_len) ;Length of an item's data
+    if ((M_SORTCTL(g_hndl, sc_flags) & D_FLAG_RELOAD) ||
+&       !(%w_info(WIF_USERID, wndid, D_UDS_DATA) && (ary = %w_info(WIF_USRMEM, wndid, D_UDS_DATA))))
+        call setup_data       ;Load the data, if needed
+
+    xcall qsort(^m(st_data.a(1:len),ary), ndx = %w_info(WIF_UFLDS, wndid), "axl_sortcallback")
+
+    xcall l_restart(a_listid, 1, ndx)   ;Restart the list
+
+    ;Set any sort indicator on the sorted column header
+    if (M_SORTCTL(g_hndl, sc_order) == D_SORT_ASC) then
+    begin
+        if (len = M_SORTCTL(g_hndl, sc_asclen))
+        begin
+            xcall axlu_sortind(axctl, D_PLACE,
+&               M_SORTCTL(g_hndl, sc_currcol),
+&               M_SORTCTL(g_hndl, sc_asc(1:len)),
+&               M_SORTCTL(g_hndl, sc_front))
+        end
+    end
+    else
+    begin
+        if (len = M_SORTCTL(g_hndl, sc_desclen))
+        begin
+            xcall axlu_sortind(axctl, D_PLACE,
+&               M_SORTCTL(g_hndl, sc_currcol),
+&               M_SORTCTL(g_hndl, sc_desc(1:len)),
+&               M_SORTCTL(g_hndl, sc_front))
+        end
+    end
+
+    ;Now setup to find the previously selected item
+    M_GETMIN(len, M_SORTCTL(g_hndl, sc_len), D_LMAXFIND)
+    xcall l_findspec(a_listid, refind, 1, len, D_LFND_FRWD, D_LFND_NOCASE,
+&       D_LFND_EQ, D_LFND_CURR,, D_LFND_DATA)
+    ;
+    ; Now setup call block to call L_PROCESS
+    ; Note we can't assume the state of cbid at this point, so recreate it
+    ;
+    cbid = %rcb_create(%numargs, DRCB_REPLICATE)
+    xcall rcb_setfnc(cbid, "l_process")
+    xcall rcb_insarg(cbid, 2, req)
+    xcall rcb_insarg(cbid, 3, data)
+    xcall rcb_insarg(cbid, 4)
+    req = D_LFIND
+    xcall rcb_call(cbid)        ;Call L_PROCESS with D_LFIND
+    ;
+    ; Now restore find parameters
+    ;
+    xcall l_findspec(a_listid, findstr, findpos, findlen, finddir, findcase,
+&       findtype, findcurr,, findsource)
+    ;
+    ; Finally, queue a D_LRESTORE so the current item doesn't get whacked
+    ;
+    xcall l_queue(a_listid, D_LRESTORE)
+    xcall w_proc(WP_HOURGLASS_OFF)
+    freturn TRUE    ;Made it!
+
+
+; Setup the data array and the load method
+; Note that we assume that cbid is still set up for L_DATA.
+
+setup_data,
+    if (alloc < 100)
+        alloc *= 2            ;Start with double what's loaded
+
+    ary = %mem_proc(DM_ALLOC, alloc * len)
+    req = D_LFIRST
+    xcall rcb_call(cbid)            ;Ask for the first record
+    req = D_LNEXT               ;For next time
+    ndx = 1
+    offset = 1              ;Offset for record
+    while (!null)               ;While we have a record
+    begin
+        call store_data             ;Add it to the array
+        incr ndx
+        xcall rcb_call(cbid)        ;Call L_DATA again, with D_LNEXT
+    end
+    ;
+    ; Now call the load method to load the remainder of records
+    ;
+    req = D_LLOADBOT
+    ;
+    ; Fix arguments for invoking the load method
+    ;
+    onerror nomethod
+    xcall l_status(a_listid, D_LMETHOD, D_LLOAD, M_SORTCTL(g_hndl, sc_lmethod))
+    xcall rcb_setfnc(cbid, M_SORTCTL(g_hndl, sc_lmethod))
+    offerror
+    xcall rcb_setarg(cbid, data, 3)
+    xcall rcb_setarg(cbid, inpid, 4)
+    xcall rcb_setarg(cbid, null = 0, 5) ;Disabled flag, which we'll ignore
+    xcall rcb_setarg(cbid, ndx, 6)
+
+    xcall rcb_call(cbid)            ;Call the load method
+    while (req == D_LLOADBOT)       ;While we got an item
+    begin
+        call store_data         ;Add it to the array
+        incr ndx
+        xcall rcb_call(cbid)        ;Call load method again
+    end
+    ;
+    ; Now set the load method to access the array
+    ;
+    xcall l_method(a_listid, D_LLOAD, "axl_load")
+    ;
+    ; Now save the data to the window user data set (UDS)
+    ;
+    ndx -= 1
+    if (ndx > 0)
+    begin
+        xcall w_flds(wndid, WF_USER, D_UDS_DATA, ndx, len)
+        while (ndx)
+        begin
+            offset -= len               ;Back up the offset
+            xcall w_flds(wndid, WF_UPUT, ndx, ^m(st_data.a(offset:len), ary))
+            decr ndx
+        end
+
+        xcall mem_proc(DM_FREE, ary)            ;Release the array
+        ary = %w_info(WIF_USRMEM, wndid, D_UDS_DATA)    ;And refernce the UDS instead
+        M_SORTCTL(g_hndl, sc_flags) &= ~D_FLAG_RELOAD   ;Clear reload flag
+    end
+    return
+;
+; Store a data item in the memory array
+
+store_data,
+    if (ndx > alloc)            ;Need more memory?
+    begin
+        onerror toobig
+        ary = %mem_proc(DM_RESIZ, (alloc += 100) * len, ary)
+        offerror
+    end
+    ^m(st_data.a(offset:len), ary) = data   ;Store this item in the array
+    offset += len               ;Bump the offset
+    return
+;
+; Too much memory needed for this list
+;
+toobig,
+    offerror
+    xcall w_proc(WP_HOURGLASS_OFF)
+    freturn %axlu_errorout("Cannot sort list %d; list data too large", a_listid)
+;
+; Couldn't get to load method (unlikely)
+;
+nomethod,
+    offerror
+    xcall w_proc(WP_HOURGLASS_OFF)
+    freturn %axlu_errorout("Could not invoke list load method %a",
+&       M_SORTCTL(g_hndl, sc_lmethod))
+.else
+    freturn FALSE               ;Non-Windows
+.endc
+.end
+
+.function axl_reset ,^val, reentrant
+;
+; Description:  Reset the list to an unsorted state
+;
+; Arguments:
+;
+    a_listid    ,n      ;ID of the list
+
+    a_keepsort  ,n      ;(Optional) keep previous sort order?
+;
+; Return value: TRUE for success, otherwise FALSE
+;
+.include "INC:axlsort.def"
+
+.align
+    stack record
+        hndl        ,D_ADDR     ;Handle to controls
+        axctl       ,D_ADDR     ;ActiveX control ID
+        len         ,D_NATINT
+
+.proc
+.ifdef D_GUI
+    if (!(hndl = %axlu_getctls(a_listid)))  ;Get controls handle
+        freturn FALSE
+
+    ;Restore the previous load method
+    if (M_SORTCTL(hndl, sc_lmethod))
+        xcall l_method(a_listid, D_LLOAD, M_SORTCTL(hndl, sc_lmethod))
+
+    if (!(^passed(a_keepsort) && a_keepsort))
+    begin
+        ;Remove any previous sort indicator
+        if (M_SORTCTL(hndl, sc_currcol))
+        begin
+            xcall l_status(a_listid, D_LAXCTRL, axctl)
+            if (M_SORTCTL(hndl, sc_order) == D_SORT_ASC) then
+            begin
+                if (len = M_SORTCTL(hndl, sc_asclen))
+                begin
+                    xcall axlu_sortind(axctl, D_REMOVE,
+&                       M_SORTCTL(hndl, sc_currcol),
+&                       M_SORTCTL(hndl, sc_asc(1:len)),
+&                       M_SORTCTL(hndl, sc_front))
+                end
+            end
+            else
+            begin
+                if (len = M_SORTCTL(hndl, sc_desclen))
+                begin
+                    xcall axlu_sortind(axctl, D_REMOVE,
+&                       M_SORTCTL(hndl, sc_currcol),
+&                       M_SORTCTL(hndl, sc_desc(1:len)),
+&                       M_SORTCTL(hndl, sc_front))
+                end
+            end
+            clear M_SORTCTL(hndl, sc_currcol)
+        end
+    end
+
+    ;Flag a reload on next sort
+    M_SORTCTL(hndl, sc_flags) |= D_FLAG_RELOAD
+    freturn TRUE
+.else
+    freturn FALSE           ;Non-Windows
+.endc
+.end
+
+.function axl_getsort   ,^val, reentrant
+;
+; Description:  Get the sortable/sorted status of a list
+;
+; Arguments:
+;
+    a_listid    ,n  ;Id of the list
+
+    a_column    ,n  ;(Optional) returned column currently sorted by (0 = none)
+
+    a_order     ,n  ;(Optional) returned sort order (see axlsort.def)
+;
+; Return value:  TRUE if this is a sortable list, FALSE if not
+;
+; Note:     This function returns the sort column and order established by
+;       axl_setsort or axle_left_click, whether or not axl_sort has yet
+;       been called.
+;
+.include "INC:axlsort.def"
+
+.align
+    stack record
+        hndl        ,D_ADDR ;Handle to controls
+
+.proc
+.ifdef D_GUI
+    if (hndl = %axlu_getctls(a_listid, TRUE))
+    begin
+        if (^passed(a_column))
+            a_column = M_SORTCTL(hndl, sc_currcol)
+        if (^passed(a_order))
+            a_order = M_SORTCTL(hndl, sc_order)
+        freturn TRUE
+    end
+.endc
+
+    freturn FALSE
+.end
+
+.function axl_setsort   ,^val, reentrant
+;
+; Description:  Set the sort column and/or order
+;
+; Arguments:
+;
+    a_listid    ,n  ;Id of the list
+
+    a_column    ,n  ;(Optional) column to sort by (0 = none, unpassed = unchanged)
+
+    a_order     ,n  ;(Optional) sort order (see axlsort.def, unpassed = unchanged)
+;
+; Return value:  TRUE if successful, otherwise FALSE
+;
+; Note:     This function establishes the sort column and order, but the list
+;       will not actually be sorted until axl_sort is called.
+;
+.include "INC:axlsort.def"
+
+.align
+    stack record
+        hndl        ,D_ADDR ;Handle to controls
+
+.proc
+.ifdef D_GUI
+    if (hndl = %axlu_getctls(a_listid))
+    begin
+        if (^passed(a_column))
+        begin
+            if ((a_column < 0) || (a_column > M_SORTCTL(hndl, sc_numcols)))
+                freturn %axlu_errorout("Column number %d not in range (0-%d)",
+&                   a_column, M_SORTCTL(hndl, sc_numcols))
+            M_SORTCTL(hndl, sc_currcol) = a_column
+        end
+        if (^passed(a_order))
+        begin
+            if ((a_order != D_SORT_ASC) && (a_order != D_SORT_DESC))
+                freturn %axlu_errorout("Sort order %d must be %d or %d",
+&                   a_order, D_SORT_ASC, D_SORT_DESC)
+            M_SORTCTL(hndl, sc_order) = a_order
+        end
+        freturn TRUE
+    end
+.endc
+
+    freturn FALSE
+.end
+
+;-------------------------------------------------------------------------------
+;
+; Callbacks:
+;
+;-------------------------------------------------------------------------------
+
+.subroutine axl_load        ,reentrant
+;
+; Description:  Load method replacement for a sorted list
+;
+; Arguments:
+;
+    a_listid    ,n  ;List ID
+
+    a_req       ,n  ;Request code
+
+    a_data      ,n  ;Returned data
+
+    a_inpid     ,n  ;ID of the input window
+
+    a_dsa       ,n  ;Disabled flag (ignored here)
+
+    a_ndx       ,n  ;Index of item requested
+
+    a_mdata1    ,n  ;(Optional) method data arguments
+    a_mdata2    ,n
+    a_mdata3    ,n
+    a_mdata4    ,n
+    a_mdata5    ,n
+    a_mdata6    ,n
+    a_mdata7    ,n
+    a_mdata8    ,n
+    a_mdata9    ,n
+    a_mdata10   ,n
+    a_mdata11   ,n
+    a_mdata12   ,n
+    a_mdata13   ,n
+    a_mdata14   ,n
+    a_mdata15   ,n
+    a_mdata16   ,n
+    a_mdata17   ,n
+    a_mdata18   ,n
+    a_mdata19   ,n
+    a_mdata20   ,n
+;
+.include "INC:axlsort.def"
+
+.align
+    stack record
+        hndl        ,D_ADDR     ;Handle to sort controls
+        wndid       ,D_NATINT   ;ID of the list window
+
+.proc
+    xcall l_status(a_listid, D_LCTRID, wndid)
+    if ((hndl = %axlu_getctls(a_listid)) .and.
+&       %w_info(WIF_USERID, wndid, D_UDS_DATA) .and.
+&       (a_ndx <= %w_info(WIF_UFLDS, wndid))) then
+    begin
+        xcall w_flds(wndid, WF_UGET, a_ndx, a_data) ;Get the data
+        xcall i_display(a_inpid, M_SORTCTL(hndl, sc_setname), a_data,
+&           ,,,,,,,,,   ;Field specifications
+&           a_mdata1, a_mdata2, a_mdata3, a_mdata4, a_mdata5,
+&           a_mdata6, a_mdata7, a_mdata8, a_mdata9, a_mdata10,
+&           a_mdata11, a_mdata12, a_mdata13, a_mdata14, a_mdata15,
+&           a_mdata16, a_mdata17, a_mdata18, a_mdata19, a_mdata20)
+    end
+    else
+        a_req = D_LEOF        ;Couldn't get there
+    xreturn
+.end
+
+.function axl_sortcallback  ,^val, reentrant
+;
+; Description:  QSORT callback function for sorting the list data
+;
+; Arguments:
+;
+    a_item1     ,a  ;First item to compare
+
+    a_item2     ,a  ;Second item to compare
+;
+; Return value:  spaceship operator result
+;
+; Notes:
+;
+;   The "spaceship operator" is the operator <=>, which is supported
+;   in languages such as Ruby for performing a general comparison.  It
+;   returns -1 if the left operand is less than the right, 0 if they are
+;   equal, or 1 if the left operand is greater than the right.  It is
+;   called the spaceship operator because in some fonts it resembles a
+;   spaceship.  We'll have to have an imaginary spaceship in Synergy.
+;
+.include "INC:axlsort.def"
+
+;Global data section setup by AXL_SORT above.
+
+    global data section axl_sortctl
+        record
+            g_hndl      ,D_ADDR         ;Handle to controls
+    endglobal
+
+;Spaceship operator
+.define M_SPACESHIP(x,y) if (x > y) then rslt = 1 else if (x < y) then rslt = -1 else rslt = 0
+
+;Same for enumerated values
+.define M_COMPARE_ENUM(x,y) rslt = %axlu_sortenum(x, y, M_SORTFLD(g_hndl, col, sc_selwnd),
+&       M_SORTFLD(g_hndl, col, sc_ebase),
+&       M_SORTFLD(g_hndl, col, sc_estep))
+
+;Access field data
+.define M_DATA(f) f(M_SORTFLD(g_hndl,col,sc_datapos):M_SORTFLD(g_hndl,col,sc_datalen))
+.define M_1 M_DATA(a_item1)
+.define M_2 M_DATA(a_item2)
+
+.align
+    stack record
+        col     ,D_NATINT       ;Column we're sorting by
+        rslt        ,D_NATINT       ;Result
+
+.proc
+    if (!(col = M_SORTCTL(g_hndl, sc_currcol))) ;No sort?
+        freturn 0             ;Everything is equal
+
+    using M_SORTFLD(g_hndl, col, sc_type) select
+    (D_DECIMAL, D_FIXED),
+    begin
+        if (M_SORTFLD(g_hndl, col, sc_selwnd)) then ;Enumerated?
+            M_COMPARE_ENUM(^d(M_1), ^d(M_2))  ;Compare enumerated
+        else
+            M_SPACESHIP(^d(M_1), ^d(M_2)) ;Compare as decimal
+    end
+    (D_INTEGER),
+    begin
+        if (M_SORTFLD(g_hndl, col, sc_selwnd)) then ;Enumerated?
+            M_COMPARE_ENUM(^i(M_1), ^i(M_2))  ;Compare enumerated
+        else
+            M_SPACESHIP(^i(M_1), ^i(M_2)) ;Compare as integer
+    end
+    (),   begin
+        M_SPACESHIP(M_1, M_2)       ;Compare as alpha
+    end
+    endusing
+
+    if (M_SORTCTL(g_hndl, sc_order) == D_SORT_DESC)
+        rslt = -rslt          ;Flip for descending
+    freturn rslt
+.end
+
+.function axle_left_click   ,^val, reentrant
+;
+; Description:  Left click event procedure for a sortable list
+;
+; Arguments:
+;
+    a_resv1     ,a  ;Reserved parameters
+    a_resv2     ,a
+
+    ^val(a_listid)  ,i  ;List ID
+    ^val(a_event)   ,i  ;Event code
+    ^val(a_col) ,i  ;Column number
+    ^val(a_row) ,i  ;Row number
+    ^val(a_x)   ,i  ;X pixel position
+    ^val(a_y)   ,i  ;Y pixel position
+    ^val(a_flags)   ,i  ;Flags
+;
+; Return value: TRUE to process click
+;
+.include "INC:axlsort.def"
+
+.align
+    stack record
+        hndl        ,D_ADDR     ;Handle to controls
+        axctl       ,D_ADDR     ;ActiveX control ID
+        len         ,D_NATINT   ;Length
+
+.proc
+    ;On a header, but not on the dividing line
+    if (a_col && (a_flags & D_LSTCLK_HEADER) && !(a_flags & D_LSTCLK_ONLINE))
+    begin
+        if (!hndl = %axlu_getctls(a_listid))        ;Get controls
+            freturn TRUE
+        if (a_col > M_SORTCTL(hndl, sc_numcols))    ;Not within our range
+            freturn TRUE
+        if (M_SORTFLD(hndl, a_col, sc_datapos)) then    ;Can sort by this one?
+        begin
+            xcall l_status(a_listid, D_LAXCTRL, axctl)  ;Get control ID
+            if (M_SORTCTL(hndl, sc_currcol))    ;Previous sort?
+            begin
+                ;Remove any previous sort indicator
+                if (M_SORTCTL(hndl, sc_order) == D_SORT_ASC) then
+                begin
+                    if (len = M_SORTCTL(hndl, sc_asclen))
+                    begin
+                        xcall axlu_sortind(axctl, D_REMOVE,
+&                           M_SORTCTL(hndl, sc_currcol),
+&                           M_SORTCTL(hndl, sc_asc(1:len)),
+&                           M_SORTCTL(hndl, sc_front))
+                    end
+                end
+                else
+                begin
+                    if (len = M_SORTCTL(hndl, sc_desclen))
+                    begin
+                        xcall axlu_sortind(axctl, D_REMOVE,
+&                           M_SORTCTL(hndl, sc_currcol),
+&                           M_SORTCTL(hndl, sc_desc(1:len)),
+&                           M_SORTCTL(hndl, sc_front))
+                    end
+                end
+            end
+            ;Are we on the same column?
+            if (M_SORTCTL(hndl, sc_currcol) == a_col) then
+                M_SORTCTL(hndl, sc_order) = !M_SORTCTL(hndl, sc_order) ;Just flip order
+            else
+            begin
+                M_SORTCTL(hndl, sc_currcol) = a_col     ;Note new column
+                M_SORTCTL(hndl, sc_order) = D_SORT_ASC  ;Default to ascending
+            end
+            xcall m_signal("O_SORTLIST")        ;Signal sort needed
+        end
+        else
+            xcall u_msgbox("You cannot sort by this field", D_MOK|D_MICONINFO)
+    end
+    freturn TRUE
+.end
+
+;-------------------------------------------------------------------------------
+;
+; Utility functions:
+;
+;-------------------------------------------------------------------------------
+
+.function axlu_errorout ,^val, reentrant, varargs
+;
+; Description:  Issue an error message and return FALSE
+;
+; Arguments:    Text of the message, followed by any number of s_bld parameters
+;
+    a_text      ,a      ;Text of the message
+;
+; Return value: FALSE
+;
+.align
+    stack record
+        cbid        ,D_ADDR     ;Handle to call block
+        msglen      ,D_NATINT   ;Length of message
+        msgbuf      ,a200       ;Message buffer
+
+.proc
+    if (%instr(1, a_text, "%")) then        ;Do we need s_bld?
+    begin
+        cbid = %rcb_create(%numargs, DRCB_REPLICATE);Copy argument block
+        xcall rcb_insarg(cbid, 1, msgbuf)       ;Insert buffer argument
+        xcall rcb_insarg(cbid, 2, msglen)       ;Insert length argument
+        xcall rcb_setfnc(cbid, "s_bld")     ;Call s_bld
+        xcall rcb_call(cbid)            ;Call it
+    end
+    else
+    begin
+        msgbuf = a_text
+        msglen = %trim(msgbuf)
+    end
+    xcall u_msgbox(msgbuf(1:msglen), D_MICONSTOP|D_MOK, "ActiveX List Sort Error")
+    freturn FALSE
+.end
+
+.function axlu_getctls  ,^val, reentrant
+;
+; Description:  Get a handle to the sort control structure
+;
+; Arguments:
+;
+    a_listid    ,n  ;ID of the list
+
+    a_quiet     ,n  ;(Optional) don't issue an error message
+;
+; Return value: handle to the structure, or 0 if not found
+;
+.include "INC:axlsort.def"
+
+.align
+    stack record
+        hndl        ,D_ADDR     ;Returned handle
+        wndid       ,D_NATINT   ;ID of the list container window
+
+.proc
+    xcall l_status(a_listid, D_LCTRID, wndid)
+    if (%w_info(WIF_USERID, wndid, D_UDS_CTLS) && (hndl = %w_info(WIF_USRMEM, wndid, D_UDS_CTLS)))
+        freturn hndl
+    if (!(^passed(a_quiet) && a_quiet))
+        xcall axlu_errorout("List %d is not sortable", a_listid)
+    freturn 0
+.end
+
+.function axlu_sortenum ,^val, reentrant
+;
+; Description:  Qsort callback utility for sorting enumerated fields
+;
+; Arguments:
+;
+    a_n1        ,n      ;Numeric value of first field
+
+    a_n2        ,n      ;Numeric value of second field
+
+    a_selwnd    ,n      ;ID of the selection window
+
+    a_ebase     ,n      ;Base value for enumeration
+
+    a_estep     ,n      ;Step value for enumeration
+;
+; Return value: Spaceship operator result (see above under AXL_SORTCALLBACK)
+;
+.align
+    stack record
+        rslt        ,D_NATINT
+	ndx1	    ,D_NATINT
+	ndx2	    ,D_NATINT
+        group alph  ,a
+            data1     ,a DS_MAXWIDTH  ;Data for first field's entry
+            data2     ,a DS_MAXWIDTH  ;Data for second field's entry
+        endgroup
+
+;Compute selection window entry from enumerated value
+.define M_ENUM2ENT(ndx,n) if ((ndx = (((n - a_ebase) / a_estep) + 1)) < 1) ndx = 1
+
+.proc
+    clear alph
+    M_ENUM2ENT(ndx1, a_n1)
+    M_ENUM2ENT(ndx2, a_n2)
+    xcall s_selinf(a_selwnd, ndx1, data1)
+    xcall s_selinf(a_selwnd, ndx2, data2)
+    M_SPACESHIP(data1, data2)
+    freturn rslt
+.end
+
+.function axlu_sortind  ,^val, reentrant
+;
+; Description:  Update the sort indicator for a column
+;
+; Arguments:
+;
+    a_ctlid     ,n      ;ActiveX control ID for the grid
+
+    a_oper      ,n      ;D_PLACE or D_REMOVE
+
+    a_col       ,n      ;Header column
+
+    a_text      ,a      ;Text to add/remove
+
+    a_front     ,n      ;At front?
+;
+; Return value: TRUE
+;
+.align
+    stack record
+        len     ,D_NATINT   ;Length of text to add/remove
+        off     ,D_NATINT   ;An offset
+        doit        ,D_NATINT   ;Update text?
+        text        ,a200       ;Text buffer
+
+.proc
+    len = ^size(a_text)
+    doit = TRUE
+    xcall ax_call(a_ctlid, "GetHeaderCell", a_col, text)
+    using a_oper select
+    (D_PLACE),  call place
+    (D_REMOVE), call remove
+    endusing
+    if (doit)
+        xcall ax_call(a_ctlid, "SetHeaderCell", a_col, %atrim(text))
+    freturn TRUE
+
+place,
+    if (a_front) then
+    begin
+        if (text(1:len) .nes. a_text) then
+            text = a_text + text
+        else
+            clear doit
+    end
+    else
+    begin
+        off = %trim(text) - len + 1
+        if ((off < 1) || (text(off:len) .nes. a_text)) then
+            text = %atrim(text) + a_text
+        else
+            clear doit
+    end
+    return
+
+remove,
+    if (a_front) then
+    begin
+        if (text(1:len) .eqs. a_text) then
+            text = text(len+1,^size(text))
+        else
+            clear doit
+    end
+    else
+    begin
+        off = %trim(text) - len + 1
+        if ((off > 0) && (text(off:len) .eqs. a_text)) then
+            clear text(off:len)
+        else
+            clear doit
+    end
+    return
+.end

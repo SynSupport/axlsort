@@ -1,0 +1,57 @@
+;-------------------------------------------------------------------------------
+;
+; axlsort.def		Include file for ActiveX list sorting functions
+;
+; Chip Camden		January 31, 2006
+;
+;-------------------------------------------------------------------------------
+;
+; Definitions:
+;
+.ifndef D_AXLSORT_DEFINED
+.define D_AXLSORT_DEFINED
+
+.ifndef DS_MAXFLDS
+.include "WND:system.def"			;For DS_MAXFLDS
+.endc
+
+;Names of the user data sets:
+.define D_UDS_CTLS	,"AXL_SORTCTLS"		;Control structure
+.define D_UDS_DATA	,"AXL_SORTDATA"		;Sorted data
+
+;Sort order
+.define D_SORT_ASC	,0			;Ascending
+.define D_SORT_DESC	,1			;Descending
+
+;Flags
+.define D_FLAG_RELOAD	,1			;Reload data on next sort
+
+.define M_SORTCTL(h,e)	^m(st_sortctls.e,h)	;Macro for accessing control members
+.define M_SORTFLD(h,n,e) ^m(st_sortctls.sc_column[n].e,h)	;Accessing a field
+.define M_GETMIN(d,x,y) if (x < y) then d = x else d = y	;Min stand-in
+.endc						;D_AXLSORT_DEFINED
+
+;
+; Structure of the user data set containing the sort controls
+;
+structure st_sortctls
+	sc_numcols	,D_NATINT		;Number of columns
+	sc_currcol	,D_NATINT		;Current column for sorting
+	sc_order	,D_NATINT		;Current sort order
+	sc_asclen	,D_NATINT		;Length of ascending sort-order indicator
+	sc_desclen	,D_NATINT		;Length of descending sort-order indicator
+	sc_front	,D_NATINT		;TRUE if sort-order indicators go in front
+	sc_len		,D_NATINT		;Length of list data
+	sc_flags	,D_NATINT		;State flags
+	sc_asc		,a16			;Sort-order indicator for ascending
+	sc_desc		,a16			;Sort-order indicator for descending
+	sc_setname	,a30			;Input set name
+	sc_lmethod	,a30			;Original load method
+	group sc_column	,[DS_MAXFLDS] a		;Information per column
+	  sc_datapos	,D_NATINT		;Position in data (0 = not sortable)
+	  sc_datalen	,D_NATINT		;Length of data
+	  sc_type	,D_NATINT		;Type (see tools.def)
+	  sc_selwnd	,D_NATINT		;Selection window if enumerated
+	  sc_ebase	,D_NATINT		;Enumerated base value
+	  sc_estep	,D_NATINT		;Enumerated step value
+	endgroup

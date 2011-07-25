@@ -1,0 +1,177 @@
+.main testsort
+external function
+    mainprog    ,i
+record
+    stopStatus  ,i4
+proc
+.ifdef DBLv9
+    try
+        stopStatus = %mainprog()
+    catch (excp ,@Exception)
+    begin
+        data ttCh ,i4, %syn_freechn()
+        open(ttCh, O, 'TT:')
+        writes(ttCh, excp.Message)
+        writes(ttCh, excp.StackTrace)
+        close ttCh
+.ifdef DBLNET
+        StopMessage()
+.endc ;DBLNET
+        stopStatus = D_EXIT_FAILURE
+    end
+    endtry
+.else ;DBLv9
+    stopStatus = %mainprog()
+.endc ;DBLv9
+    xcall flags(7000000, 1)
+    stop stopStatus
+end
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+function mainprog ,i
+
+.include "DBLDIR:activex.def"
+.include "WND:tools.def"
+
+;.define FRONT_SORT_IND
+;.define MULTILINE_LIST
+;.define USE_LINPUT
+.define RELOAD_KEEPS_SORT
+
+.ifdef MULTILINE_LIST
+.define NUM_ROWS    2
+.define GRIDCOLOR   ",gridcolor(88,7)"
+.else
+.define NUM_ROWS    1
+.define GRIDCOLOR   ""
+.endc
+
+.align
+    stack record
+        bldid       ,D_NATINT
+        inpid       ,D_NATINT
+        lstid       ,D_NATINT
+        clsid       ,D_NATINT
+        ctlid       ,D_NATINT
+        req         ,D_NATINT
+        factor      ,D_NATINT
+        col         ,D_NATINT
+        ord         ,D_NATINT
+        data        ,a1000
+
+    literal
+        sels        ,3a14, "Hello world", "Goodbye", "Ciao"
+        sels2       ,4a14, "Wanda", "Zelda", "Amelia", "Brunhilde"
+        flds        ,5a2, "f1","f2","f3","f5","f6"
+        acdc        ,2a10, "Ascending", "Descending"
+
+.proc
+    xcall u_start
+    factor = 2
+    xcall ib_input(bldid, "theinp", NUM_ROWS, 100)
+    xcall ib_field(bldid, "f1", D_FLD_SIZE, 10)
+    xcall ib_field(bldid, "f2", D_FLD_SIZE, 8, D_FLD_TYPE, D_DECIMAL)
+    xcall ib_field(bldid, "f3", D_FLD_SIZE, 4, D_FLD_TYPE, D_INTEGER,
+&       D_FLD_PROMPT, " N: ")
+.ifdef MULTILINE_LIST
+    xcall ib_field(bldid, "f4", D_FLD_SIZE, 5, D_FLD_POS, NUM_ROWS, 1)
+    xcall u_wincolor(D_SETCOLOR, 88, RGB_VALUE(^x(D7), ^x(FF), ^x(C7))
+.else
+    xcall ib_field(bldid, "f4", D_FLD_SIZE, 5)
+.endc
+    xcall ib_field(bldid, "f5", D_FLD_SIZE, 4, D_FLD_TYPE, D_DECIMAL,
+&       D_FLD_SELECT, 0, 0, 3,, 3, sels,
+&       D_FLD_ENUM, 14, 1, 1)
+    xcall ib_field(bldid, "f6", D_FLD_SIZE, 4, D_FLD_TYPE, D_INTEGER,
+&       D_FLD_SELECT, 0, 0, 4,, 4, sels2,
+&       D_FLD_ENUM, 14, 1, 1)
+    xcall ib_set(bldid, "theset", "theinp", 5, flds)
+    xcall ib_end(bldid, inpid)
+    xcall l_class(clsid, "lclass",,,, NUM_ROWS,,,,,, "loadmethod", "activex" + GRIDCOLOR)
+    xcall l_create(lstid, inpid, data, g_utlib, "lclass")
+.ifdef MULTILINE_LIST
+    xcall l_sect(lstid, "Alpha|Decimal|Prompt|Integer|", D_HEADER)
+    xcall l_sect(lstid, "Not in set|Dec Sel|Int Sel||", D_HEADER, D_POSITION, 2, 1, D_NOCLEAR)
+.else
+    xcall l_sect(lstid, "Alpha|Decimal|Prompt|Integer|Not in set|Dec Sel|Int Sel|", D_HEADER)
+.endc
+    xcall l_button(lstid, "O_RELOAD", DSB_TEXT, "Reload")
+    xcall l_state(lstid, D_LMAXIMIZED)
+.ifndef USE_LINPUT
+    xcall l_status(lstid, D_LAXCTRL, ctlid)
+    xcall ax_set(ctlid, "RowMode", TRUE)
+.endc
+
+.ifdef FRONT_SORT_IND
+    xcall axl_sortable(lstid,,, "^ ", "v ", TRUE)
+.else
+    xcall axl_sortable(lstid,,, " ^", " v")
+.endc
+
+    repeat
+    begin
+        if (%axl_getsort(lstid, col, ord))
+        begin
+            if (col) then
+                xcall e_sect("Sorted by column " + %string(col) + ", " + acdc(ord+1), D_LEFT)
+            else
+                xcall e_sect("Not sorted", D_LEFT)
+        end
+.ifdef USE_LINPUT
+        xcall l_input(lstid, "theset", data, data,,,,,,,, factor)
+.else
+        xcall l_select(lstid, req=D_LNOP, data,,,,,,,,,,,,, factor)
+.endc
+        if (g_select)
+        begin
+            using g_entnam select
+            ("O_RELOAD "),    begin
+.ifdef RELOAD_KEEPS_SORT
+                xcall axl_reset(lstid, TRUE)
+.else
+                xcall axl_reset(lstid)
+.endc
+                incr factor
+                xcall l_restart(lstid)
+.ifdef RELOAD_KEEPS_SORT
+                xcall axl_sort(lstid, factor)
+.endc
+            end
+            ("O_SORTLIST "),    xcall axl_sort(lstid, factor)
+            endusing
+        end
+    end
+    xcall u_finish
+.end
+
+.subroutine loadmethod
+    a_lstid ,n
+    a_req   ,n
+    group a_data    ,a
+        f1        ,a10
+        f2        ,d8
+        f3        ,i4
+        f4        ,a5
+        f5        ,d4
+        f6        ,i4
+    endgroup
+    a_inpid ,n
+    a_dsa   ,n
+    a_ndx   ,n
+    a_factor,n
+
+.proc
+    if (a_ndx <= 1000) then
+    begin
+        f1 = %char(a_ndx - (a_ndx / 64 * 64) + 64)
+        f2 = a_ndx - (a_ndx / a_factor * a_factor) + 1
+        f3 = a_ndx
+        f5 = a_ndx - (a_ndx / 3 * 3) + 1
+        f6 = a_ndx - (a_ndx / 4 * 4) + 1
+        xcall i_display(a_inpid,, a_data)
+    end
+    else
+        a_req = D_LEOF
+    xreturn
+.end
